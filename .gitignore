@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# LoRA generated files
+job-extractor-lora/
+
+# Generated data splits (regenerated deterministically by prepare_splits();
+# only the source data/job_postings.jsonl is tracked)
+data/train_split.jsonl
+data/val_split.jsonl
+data/test_split.jsonl
+
+#MacOS
+.DS_Store

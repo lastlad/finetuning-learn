@@ -1,0 +1,13 @@
+[project]
+name = "finetuning-learn"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10.12"
+dependencies = [
+    "accelerate>=1.14.0",
+    "datasets>=5.0.0",
+    "peft>=0.19.1",
+    "transformers>=5.12.1",
+    "trl>=1.6.0",
+]
