@@ -10,7 +10,7 @@ wheels/
 .venv
 
 # LoRA generated files
-job-extractor-lora/
+job-extractor-lora*/
 
 # Generated data splits (regenerated deterministically by prepare_splits();
 # only the source data/job_postings.jsonl is tracked)
@@ -20,3 +20,6 @@ data/test_split.jsonl
 
 #MacOS
 .DS_Store
+
+# Environment variables
+.env

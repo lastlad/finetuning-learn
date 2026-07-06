@@ -34,6 +34,7 @@ N_TEST = 3
 TRAIN_SPLIT = f"{DATA_DIR}/train_split.jsonl"
 VAL_SPLIT = f"{DATA_DIR}/val_split.jsonl"
 TEST_SPLIT = f"{DATA_DIR}/test_split.jsonl"
+SYNTHETIC_PATH = f"{DATA_DIR}/synthetic.jsonl"   # written by step5_gen_synthetic.py
 
 # Few-shot: how many worked examples to drop into the prompt at eval time.
 FEWSHOT_N = 3              # try 0, 2, 3, 5
@@ -199,18 +200,23 @@ def score(pred, gold):
 
 
 def evaluate(model, tok, rows, label, demos=None):
-    """Run the model over the test rows and print the three task metrics that
-    actually matter for structured extraction (loss is not one of them)."""
+    """Run the model over the test rows, print the three task metrics that
+    actually matter for structured extraction (loss is not one of them), and
+    return them as a dict so callers (e.g. the ablation) can collect a table."""
     valid = corr = tot = lcount = 0
     lf1 = 0.0
     for r in rows:
         out = generate(model, tok, r["posting"], demos)
         v, c, t, f, lc = score(parse_json(out), r["labels"])
         valid += v; corr += c; tot += t; lf1 += f; lcount += lc
+    metrics = {"json_valid": valid / len(rows),
+               "field_acc": corr / tot,
+               "skills_f1": lf1 / lcount}
     print(f"\n=== {label} ===")
-    print(f"JSON valid:      {valid}/{len(rows)}  ({100*valid/len(rows):.0f}%)")
-    print(f"Field accuracy:  {corr}/{tot}  ({100*corr/tot:.0f}%)")
-    print(f"Skills list F1:  {lf1/lcount:.2f}")
+    print(f"JSON valid:      {valid}/{len(rows)}  ({100*metrics['json_valid']:.0f}%)")
+    print(f"Field accuracy:  {corr}/{tot}  ({100*metrics['field_acc']:.0f}%)")
+    print(f"Skills list F1:  {metrics['skills_f1']:.2f}")
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +233,77 @@ def load_base_model():
     return model.to(get_device())
 
 
-def load_finetuned_model(base):
-    """Wrap the base model with the trained LoRA adapter from OUTPUT_DIR."""
+def load_finetuned_model(base, output_dir=OUTPUT_DIR):
+    """Wrap the base model with a trained LoRA adapter (default OUTPUT_DIR)."""
     from peft import PeftModel
-    return PeftModel.from_pretrained(base, OUTPUT_DIR)
+    return PeftModel.from_pretrained(base, output_dir)
+
+
+def train_lora(train_rows, val_rows, output_dir, epochs=EPOCHS):
+    """Train a LoRA adapter on the given rows and save it to output_dir.
+
+    This is the single source of truth for the training recipe -- step2 trains
+    once with it, the data-size ablation calls it repeatedly with different row
+    counts. Heavy libs are imported lazily so eval-only steps stay fast to load.
+    """
+    import torch
+    from datasets import Dataset
+    from peft import LoraConfig
+    from trl import SFTConfig, SFTTrainer
+
+    train_ds = Dataset.from_list([to_chat(r) for r in train_rows])
+    val_ds = Dataset.from_list([to_chat(r) for r in val_rows])
+
+    model_kwargs = {"dtype": get_dtype()}
+    if USE_4BIT:   # QLoRA -- CUDA only
+        from transformers import BitsAndBytesConfig
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+
+    lora = LoraConfig(
+        r=LORA_R,
+        lora_alpha=LORA_ALPHA,
+        lora_dropout=LORA_DROPOUT,
+        target_modules=TARGET_MODULES,
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+
+    # bf16 autocast + gradient checkpointing only pay off on a CUDA GPU; on
+    # MPS/CPU they hurt or break, so gate them on the device.
+    on_cuda = get_device() == "cuda"
+
+    args = SFTConfig(
+        output_dir=output_dir,
+        num_train_epochs=epochs,
+        per_device_train_batch_size=BATCH_SIZE,
+        gradient_accumulation_steps=GRAD_ACCUM,
+        learning_rate=LEARNING_RATE,
+        warmup_ratio=WARMUP_RATIO,
+        lr_scheduler_type="cosine",
+        max_length=MAX_LEN,
+        bf16=on_cuda,
+        gradient_checkpointing=on_cuda,
+        logging_steps=1,
+        eval_strategy="epoch",           # watch eval_loss vs train loss for overfitting
+        save_strategy="no",              # we save once at the end -> no per-epoch checkpoint dirs
+        report_to="none",                # set "wandb" to see live loss curves
+        assistant_only_loss=True,        # loss masking; trainer auto-patches the chat template
+        seed=SEED,
+        model_init_kwargs=model_kwargs,
+    )
+
+    trainer = SFTTrainer(
+        model=MODEL_NAME,
+        args=args,
+        train_dataset=train_ds,
+        eval_dataset=val_ds,
+        peft_config=lora,
+    )
+    trainer.train()
+    trainer.save_model(output_dir)
+    return output_dir
